@@ -1,0 +1,6 @@
+.git/
+web/
+docs/
+**/.venv/
+**/__pycache__/
+**/*.db
