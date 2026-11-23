@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import TemperatureChart from "./components/TemperatureChart";
 
 const WINDOW_STALE_MS = 15000;
+const WINDOW_HISTORY_MS = 5 * 60 * 1000;
+const DEFAULT_SAFE_RANGE = { min: 2, max: 8 };
 
 function toWsFromApi(apiUrl) {
   if (!apiUrl) {
@@ -117,6 +120,50 @@ function buildStateFromSnapshot(snapshot) {
   };
 }
 
+function normalizeSafeRange(snapshotPayload) {
+  const config = snapshotPayload?.config || snapshotPayload || {};
+  const minKey = pick(config, ["safe_min", "safeMin", "safe_min_c", "min_temp", "min", "low"]);
+  const maxKey = pick(config, ["safe_max", "safeMax", "safe_max_c", "max_temp", "max", "high"]);
+
+  const min = minKey ? Number(config[minKey]) : Number.NaN;
+  const max = maxKey ? Number(config[maxKey]) : Number.NaN;
+
+  if (Number.isFinite(min) && Number.isFinite(max) && min < max) {
+    return { min, max };
+  }
+
+  return DEFAULT_SAFE_RANGE;
+}
+
+function trimReadings(readings, referenceTs) {
+  const cutoff = referenceTs - WINDOW_HISTORY_MS;
+  return readings.filter((item) => item.timestampMs >= cutoff);
+}
+
+function normalizeReadingsList(list) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+
+  return list
+    .map((entry) => {
+      const normalized = normalizeReading(entry);
+      if (!normalized) {
+        return null;
+      }
+      const timestampMs = toMs(normalized.timestamp);
+      if (!timestampMs) {
+        return null;
+      }
+      return {
+        ...normalized,
+        timestampMs,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+}
+
 function formatTemp(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "—";
@@ -216,6 +263,8 @@ function useRealtimeDashboard(socketUrl) {
   const [connection, setConnection] = useState("connecting");
   const [snapshotLoaded, setSnapshotLoaded] = useState(false);
   const [reading, setReading] = useState(null);
+  const [readings, setReadings] = useState([]);
+  const [safeRange, setSafeRange] = useState(DEFAULT_SAFE_RANGE);
   const [lastEventAt, setLastEventAt] = useState(null);
   const socketRef = useRef(null);
   const reconnectRef = useRef(null);
@@ -253,8 +302,17 @@ function useRealtimeDashboard(socketUrl) {
         if (eventType === "snapshot" || (!eventType && (payload?.readings || payload?.snapshot))) {
           const snapshotPayload = payload?.snapshot || payload;
           const normalized = buildStateFromSnapshot(snapshotPayload);
+          const normalizedReadings = normalizeReadingsList(snapshotPayload?.readings);
+          const baseTs = normalized?.timestampMs || normalizedReadings[normalizedReadings.length - 1]?.timestampMs;
+
           if (normalized) {
             setReading(normalized);
+          } else if (normalizedReadings.length) {
+            setReading(normalizedReadings[normalizedReadings.length - 1]);
+          }
+          if (normalized || normalizedReadings.length) {
+            setReadings(baseTs ? trimReadings(normalizedReadings, baseTs) : normalizedReadings);
+            setSafeRange(normalizeSafeRange(snapshotPayload?.config || snapshotPayload));
             setSnapshotLoaded(true);
             setLastEventAt(now);
           }
@@ -268,10 +326,12 @@ function useRealtimeDashboard(socketUrl) {
         ) {
           const normalized = normalizeReading(payload?.reading || payload?.current || payload);
           if (normalized) {
-            setReading({
+            const normalizedWithTs = {
               ...normalized,
               timestampMs: toMs(normalized.timestamp) ?? now,
-            });
+            };
+            setReading(normalizedWithTs);
+            setReadings((current) => trimReadings([...current, normalizedWithTs], normalizedWithTs.timestampMs));
             setSnapshotLoaded(true);
             setLastEventAt(now);
           }
@@ -304,13 +364,14 @@ function useRealtimeDashboard(socketUrl) {
     };
   }, [socketUrl]);
 
-  return { connection, snapshotLoaded, reading, lastEventAt };
+  return { connection, snapshotLoaded, reading, readings, safeRange, lastEventAt };
 }
 
 function App() {
   const apiUrl = import.meta.env.VITE_API_URL || "";
   const wsUrl = import.meta.env.VITE_WS_URL || toWsFromApi(apiUrl);
-  const { connection, snapshotLoaded, reading, lastEventAt } = useRealtimeDashboard(wsUrl);
+  const { connection, snapshotLoaded, reading, readings, safeRange, lastEventAt } =
+    useRealtimeDashboard(wsUrl);
   const now = Date.now();
   const stale = reading?.timestampMs ? now - reading.timestampMs > WINDOW_STALE_MS : false;
 
@@ -368,7 +429,10 @@ function App() {
         <article>
           <span className="kicker">Temperatura</span>
           <strong>{formatTemp(reading?.temperature)}</strong>
-          <small>Faixa segura definida pelo backend</small>
+          <small>
+            Faixa segura {safeRange.min.toString().replace(".", ",")} °C a{" "}
+            {safeRange.max.toString().replace(".", ",")} °C
+          </small>
         </article>
         <article>
           <span className="kicker">Tempo até 8 °C</span>
@@ -398,7 +462,21 @@ function App() {
           <div className="panel-header">
             <h3>Últimos 5 minutos</h3>
           </div>
-          <p>Estrutura visual pronta. O gráfico em tempo real entra na BAG-142.</p>
+          <div className="chart-legend">
+            <span>
+              <i className="legend-safe" />
+              Faixa segura
+            </span>
+            <span>
+              <i className="legend-door" />
+              Porta aberta
+            </span>
+            <span>
+              <i className="legend-alert" />
+              Fora da faixa
+            </span>
+          </div>
+          <TemperatureChart readings={readings} safeRange={safeRange} />
         </article>
         <article className="panel">
           <div className="panel-header">
