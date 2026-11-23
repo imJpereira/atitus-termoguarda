@@ -164,6 +164,73 @@ function normalizeReadingsList(list) {
     .sort((a, b) => a.timestampMs - b.timestampMs);
 }
 
+function normalizeAlert(source) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  const timestampKey = pick(source, ["timestamp", "ts", "time", "created_at", "at"]);
+  const stateKey = pick(source, ["state", "status"]);
+  const reasonKey = pick(source, ["reason", "motivo", "message", "description"]);
+  const temperatureKey = pick(source, ["temperature", "temp", "t"]);
+
+  const timestampMs = toMs(timestampKey ? source[timestampKey] : null);
+  if (!timestampMs) {
+    return null;
+  }
+
+  return {
+    id: `${timestampMs}-${Math.random().toString(36).slice(2, 10)}`,
+    timestampMs,
+    state: normalizeState(stateKey ? source[stateKey] : null),
+    reason: reasonKey ? String(source[reasonKey]) : "Motivo não informado",
+    temperature: temperatureKey ? source[temperatureKey] : null,
+  };
+}
+
+function normalizeAlertsList(list) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+
+  return list
+    .map((item) => normalizeAlert(item))
+    .filter(Boolean)
+    .sort((a, b) => b.timestampMs - a.timestampMs)
+    .slice(0, 100);
+}
+
+function formatAlertDate(value) {
+  return new Date(value).toLocaleDateString("pt-BR");
+}
+
+function formatAlertTime(value) {
+  return new Date(value).toLocaleTimeString("pt-BR");
+}
+
+function alertStateLabel(value) {
+  if (value === "ATENCAO") {
+    return "ATENÇÃO";
+  }
+  if (value === "ALARME") {
+    return "ALARME";
+  }
+  if (value === "OK") {
+    return "OK";
+  }
+  return "SEM DADOS";
+}
+
+function alertStateClass(value) {
+  if (value === "ALARME") {
+    return "alert-tag alert-tag-alarm";
+  }
+  if (value === "ATENCAO") {
+    return "alert-tag alert-tag-attention";
+  }
+  return "alert-tag";
+}
+
 function formatTemp(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "—";
@@ -264,6 +331,7 @@ function useRealtimeDashboard(socketUrl) {
   const [snapshotLoaded, setSnapshotLoaded] = useState(false);
   const [reading, setReading] = useState(null);
   const [readings, setReadings] = useState([]);
+  const [alerts, setAlerts] = useState([]);
   const [safeRange, setSafeRange] = useState(DEFAULT_SAFE_RANGE);
   const [lastEventAt, setLastEventAt] = useState(null);
   const socketRef = useRef(null);
@@ -303,6 +371,7 @@ function useRealtimeDashboard(socketUrl) {
           const snapshotPayload = payload?.snapshot || payload;
           const normalized = buildStateFromSnapshot(snapshotPayload);
           const normalizedReadings = normalizeReadingsList(snapshotPayload?.readings);
+          const normalizedAlerts = normalizeAlertsList(snapshotPayload?.alerts);
           const baseTs = normalized?.timestampMs || normalizedReadings[normalizedReadings.length - 1]?.timestampMs;
 
           if (normalized) {
@@ -310,8 +379,9 @@ function useRealtimeDashboard(socketUrl) {
           } else if (normalizedReadings.length) {
             setReading(normalizedReadings[normalizedReadings.length - 1]);
           }
-          if (normalized || normalizedReadings.length) {
+          if (normalized || normalizedReadings.length || normalizedAlerts.length) {
             setReadings(baseTs ? trimReadings(normalizedReadings, baseTs) : normalizedReadings);
+            setAlerts(normalizedAlerts);
             setSafeRange(normalizeSafeRange(snapshotPayload?.config || snapshotPayload));
             setSnapshotLoaded(true);
             setLastEventAt(now);
@@ -333,6 +403,21 @@ function useRealtimeDashboard(socketUrl) {
             setReading(normalizedWithTs);
             setReadings((current) => trimReadings([...current, normalizedWithTs], normalizedWithTs.timestampMs));
             setSnapshotLoaded(true);
+            setLastEventAt(now);
+          }
+          return;
+        }
+
+        if (
+          eventType === "alert" ||
+          (!eventType &&
+            (payload?.reason !== undefined ||
+              payload?.motivo !== undefined ||
+              payload?.alert?.reason !== undefined))
+        ) {
+          const normalizedAlert = normalizeAlert(payload?.alert || payload);
+          if (normalizedAlert) {
+            setAlerts((current) => [normalizedAlert, ...current].slice(0, 100));
             setLastEventAt(now);
           }
         }
@@ -364,16 +449,18 @@ function useRealtimeDashboard(socketUrl) {
     };
   }, [socketUrl]);
 
-  return { connection, snapshotLoaded, reading, readings, safeRange, lastEventAt };
+  return { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt };
 }
 
 function App() {
   const apiUrl = import.meta.env.VITE_API_URL || "";
   const wsUrl = import.meta.env.VITE_WS_URL || toWsFromApi(apiUrl);
-  const { connection, snapshotLoaded, reading, readings, safeRange, lastEventAt } =
+  const { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt } =
     useRealtimeDashboard(wsUrl);
+  const [modalOpen, setModalOpen] = useState(false);
   const now = Date.now();
   const stale = reading?.timestampMs ? now - reading.timestampMs > WINDOW_STALE_MS : false;
+  const recentAlerts = useMemo(() => alerts.slice(0, 5), [alerts]);
 
   const effectiveState = useMemo(() => {
     if (!snapshotLoaded || !reading) {
@@ -398,6 +485,21 @@ function App() {
       : "Arduino online";
 
   const updatedText = lastEventAt ? new Date(lastEventAt).toLocaleTimeString("pt-BR") : "—";
+
+  useEffect(() => {
+    if (!modalOpen) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setModalOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [modalOpen]);
 
   return (
     <main className="dashboard">
@@ -481,9 +583,27 @@ function App() {
         <article className="panel">
           <div className="panel-header">
             <h3>Alertas</h3>
+            <span className="alerts-count">{alerts.length} registrados</span>
           </div>
-          <p>Histórico de alertas será integrado na BAG-143.</p>
-          <button type="button" className="ghost-button" disabled>
+          {recentAlerts.length ? (
+            <div className="alerts-list">
+              {recentAlerts.map((alertItem) => (
+                <div className="alerts-item" key={alertItem.id}>
+                  <span className="alerts-time">{formatAlertTime(alertItem.timestampMs)}</span>
+                  <div className="alerts-body">
+                    <strong>{alertItem.reason}</strong>
+                    <small>
+                      {formatAlertDate(alertItem.timestampMs)} · {formatTemp(alertItem.temperature)}
+                    </small>
+                  </div>
+                  <span className={alertStateClass(alertItem.state)}>{alertStateLabel(alertItem.state)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="alerts-empty">Nenhum alerta registrado</p>
+          )}
+          <button type="button" className="ghost-button" onClick={() => setModalOpen(true)}>
             Ver histórico completo
           </button>
         </article>
@@ -493,6 +613,52 @@ function App() {
         <span>API: {apiUrl || "não configurada"}</span>
         <span>WS: {wsUrl || "não configurado"}</span>
       </footer>
+
+      {modalOpen ? (
+        <div className="modal-backdrop" onClick={() => setModalOpen(false)}>
+          <div className="modal" role="dialog" aria-label="Histórico de alertas" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h4>Histórico de alertas</h4>
+              <button type="button" className="modal-close" aria-label="Fechar" onClick={() => setModalOpen(false)}>
+                X
+              </button>
+            </div>
+            <p className="modal-subtitle">Mais recentes primeiro, limitado a 100 registros em memória.</p>
+            <div className="modal-table-wrap">
+              <table className="alerts-table">
+                <thead>
+                  <tr>
+                    <th>Data</th>
+                    <th>Hora</th>
+                    <th>Estado</th>
+                    <th>Motivo</th>
+                    <th>Temperatura</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alerts.length ? (
+                    alerts.map((alertItem) => (
+                      <tr key={`full-${alertItem.id}`}>
+                        <td>{formatAlertDate(alertItem.timestampMs)}</td>
+                        <td>{formatAlertTime(alertItem.timestampMs)}</td>
+                        <td>
+                          <span className={alertStateClass(alertItem.state)}>{alertStateLabel(alertItem.state)}</span>
+                        </td>
+                        <td>{alertItem.reason}</td>
+                        <td>{formatTemp(alertItem.temperature)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>Nenhum alerta registrado</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
