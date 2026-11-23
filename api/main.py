@@ -1,19 +1,29 @@
+from collections import deque
 from contextlib import asynccontextmanager
 import math
 import os
 import threading
-from fastapi import FastAPI, HTTPException
+import time
+from fastapi import FastAPI
 import serial
 
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyACM0")
 BAUD_RATE = 9600
-VALID_STATES = {"OK", "ATENCAO", "ALARME"}
+SAFE_MIN_C = 2.0
+SAFE_MAX_C = 8.0
+DOOR_OPEN_LIMIT_CM = 10.0
+DOOR_OPEN_SECONDS = 15.0
+REMAINING_WARNING_SECONDS = 30.0
+TREND_WINDOW_SECONDS = 60.0
+MAX_READINGS = 300
 
 serial_conn = None
 serial_lock = threading.Lock()
 stop_event = threading.Event()
 current_state = "OK"
 latest_reading = None
+readings = deque(maxlen=MAX_READINGS)
+door_open_since = None
 
 
 def parse_reading(line: str):
@@ -43,6 +53,84 @@ def parse_reading(line: str):
     }
 
 
+def estimate_remaining_seconds(current_temp: float | None, now: float) -> int | None:
+    if current_temp is None or current_temp > SAFE_MAX_C:
+        return None
+    cutoff = now - TREND_WINDOW_SECONDS
+    oldest = None
+    for item in readings:
+        if item["timestamp"] >= cutoff and item["temperature"] is not None:
+            oldest = item
+            break
+    if oldest is None:
+        return None
+    dt = now - oldest["timestamp"]
+    if dt <= 0:
+        return None
+    rate_per_sec = (current_temp - oldest["temperature"]) / dt
+    if rate_per_sec <= 0:
+        return None
+    return max(0, round((SAFE_MAX_C - current_temp) / rate_per_sec))
+
+
+def evaluate_state(
+    temperature: float | None,
+    humidity: float | None,
+    door_open: bool,
+    door_open_duration: float,
+    remaining_seconds: int | None,
+) -> tuple[str, str | None]:
+    if temperature is None or humidity is None:
+        return "ALARME", "falha do sensor"
+    if temperature < SAFE_MIN_C or temperature > SAFE_MAX_C:
+        return "ALARME", "temperatura fora da faixa"
+    if door_open and door_open_duration >= DOOR_OPEN_SECONDS:
+        return "ATENCAO", "porta aberta"
+    if remaining_seconds is not None and remaining_seconds < REMAINING_WARNING_SECONDS:
+        return "ATENCAO", "tempo restante baixo"
+    return "OK", None
+
+
+def process_reading(parsed: dict, now: float | None = None) -> dict:
+    global current_state, latest_reading, door_open_since
+    if now is None:
+        now = time.time()
+    temperature = parsed["temperature"]
+    humidity = parsed["humidity"]
+    distance = parsed["distance"]
+    door_open = distance < 0 or distance > DOOR_OPEN_LIMIT_CM
+    if door_open:
+        if door_open_since is None:
+            door_open_since = now
+        door_open_duration = now - door_open_since
+    else:
+        door_open_since = None
+        door_open_duration = 0.0
+
+    remaining_seconds = estimate_remaining_seconds(temperature, now)
+    state, reason = evaluate_state(
+        temperature,
+        humidity,
+        door_open,
+        door_open_duration,
+        remaining_seconds,
+    )
+    entry = {
+        "timestamp": now,
+        "temperature": temperature,
+        "humidity": humidity,
+        "distance": distance,
+        "door_open": door_open,
+        "state": state,
+        "remaining_seconds": remaining_seconds,
+        "reason": reason,
+    }
+    readings.append(entry)
+    current_state = state
+    latest_reading = entry
+    return entry
+
+
 def send_state(state: str) -> bool:
     with serial_lock:
         if serial_conn is None or not serial_conn.is_open:
@@ -56,7 +144,7 @@ def send_state(state: str) -> bool:
 
 
 def serial_worker():
-    global serial_conn, latest_reading
+    global serial_conn
     while not stop_event.is_set():
         try:
             if serial_conn is None or not serial_conn.is_open:
@@ -73,7 +161,7 @@ def serial_worker():
                 continue
             reading = parse_reading(line)
             if reading is not None:
-                latest_reading = reading
+                process_reading(reading)
                 print(line, flush=True)
                 send_state(current_state)
         except (serial.SerialException, OSError):
@@ -112,17 +200,8 @@ def health():
         "status": "ok",
         "state": current_state,
         "reading": latest_reading,
+        "readings_count": len(readings),
     }
 
-
-@app.post("/state/{state}")
-def set_state(state: str):
-    global current_state
-    normalized = state.upper()
-    if normalized not in VALID_STATES:
-        raise HTTPException(status_code=400, detail="Invalid state")
-    current_state = normalized
-    sent = send_state(current_state)
-    return {"state": current_state, "sent": sent}
 
 
