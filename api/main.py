@@ -1,13 +1,15 @@
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 import math
 import os
+import sqlite3
 import threading
 import time
 from fastapi import FastAPI
 import serial
 
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyACM0")
+DB_PATH = os.getenv("DB_PATH", "alerts.db")
 BAUD_RATE = 9600
 SAFE_MIN_C = 2.0
 SAFE_MAX_C = 8.0
@@ -24,6 +26,47 @@ current_state = "OK"
 latest_reading = None
 readings = deque(maxlen=MAX_READINGS)
 door_open_since = None
+
+
+def init_db():
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alerts (
+                timestamp REAL NOT NULL,
+                state TEXT NOT NULL,
+                temperature REAL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
+
+
+def save_alert(timestamp: float, state: str, temperature: float | None, reason: str):
+    init_db()
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+        conn.execute(
+            "INSERT INTO alerts (timestamp, state, temperature, reason) VALUES (?, ?, ?, ?)",
+            (timestamp, state, temperature, reason),
+        )
+
+
+def get_alerts(limit: int = 100) -> list[dict]:
+    init_db()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        rows = conn.execute(
+            "SELECT timestamp, state, temperature, reason FROM alerts ORDER BY timestamp DESC, rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "timestamp": row[0],
+            "state": row[1],
+            "temperature": row[2],
+            "reason": row[3],
+        }
+        for row in rows
+    ]
 
 
 def parse_reading(line: str):
@@ -126,6 +169,8 @@ def process_reading(parsed: dict, now: float | None = None) -> dict:
         "reason": reason,
     }
     readings.append(entry)
+    if state in ("ATENCAO", "ALARME") and state != current_state and reason is not None:
+        save_alert(now, state, temperature, reason)
     current_state = state
     latest_reading = entry
     return entry
@@ -177,6 +222,7 @@ def serial_worker():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    init_db()
     stop_event.clear()
     thread = threading.Thread(target=serial_worker, daemon=True)
     thread.start()
