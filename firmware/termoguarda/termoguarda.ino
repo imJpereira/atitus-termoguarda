@@ -28,6 +28,23 @@ bool portaAberta = false;
 float temperaturaAtual = NAN;
 bool falhaDht = true;
 
+String estadoLocal() {
+  if (falhaDht || temperaturaAtual < 2.0 || temperaturaAtual > 8.0) return "ALARME";
+  if (portaAberta && millis() - inicioPortaAberta >= tempoPortaAberta) return "ATENCAO";
+  return "OK";
+}
+
+void atualizarAtuadores() {
+  bool alarme = estadoAtual == "ALARME" || falhaDht;
+  bool amarelo = estadoAtual == "ATENCAO";
+  if (modoLocal && !alarme) amarelo = (millis() / 500) % 2 == 0;
+  digitalWrite(LED_VERDE, estadoAtual == "OK" && !modoLocal ? HIGH : LOW);
+  digitalWrite(LED_AMARELO, amarelo ? HIGH : LOW);
+  digitalWrite(LED_VERMELHO, alarme ? HIGH : LOW);
+  bool buzzerAtivo = alarme && (long)(millis() - buzzerSilenciadoAte) >= 0;
+  digitalWrite(BUZZER, buzzerAtivo ? HIGH : LOW);
+}
+
 void setup() {
   Serial.begin(9600);
   dht.begin();
@@ -45,7 +62,6 @@ void setup() {
 }
 
 void loop() {
-  // Lê comandos completos terminados por newline, sem bloquear sensores ou botão.
   while (Serial.available() > 0) {
     char caractere = Serial.read();
     if (caractere == '\n') {
@@ -62,7 +78,6 @@ void loop() {
     }
   }
 
-  // O botão usa pull-up interno; LOW indica pressionado. Envia e silencia localmente.
   int estadoBotao = digitalRead(BOTAO_PIN);
   if (estadoBotao == LOW && ultimoEstadoBotao == HIGH) {
     Serial.println("B:1");
@@ -73,7 +88,6 @@ void loop() {
   ultimoEstadoBotao = estadoBotao;
   atualizarAtuadores();
 
-  // Agenda leituras sem delay para manter a resposta ao botão.
   unsigned long agora = millis();
   if (agora - ultimaMensagemPi >= timeoutRaspberry) modoLocal = true;
   if (agora - ultimaLeitura >= intervaloLeitura) {
@@ -102,7 +116,6 @@ void loop() {
       atualizarAtuadores();
     }
 
-    // ERR identifica falha do DHT; -1 identifica ausência de eco do HC-SR04.
     Serial.print("T:");
     if (isnan(temperatura)) Serial.print("ERR");
     else Serial.print(temperatura, 1);
@@ -114,23 +127,4 @@ void loop() {
     Serial.print(",D:");
     Serial.println(distancia, 1);
   }
-}
-
-// Garante LEDs exclusivos e reaplica o alarme após o período de silêncio.
-void atualizarAtuadores() {
-  bool alarme = estadoAtual == "ALARME" || falhaDht;
-  bool amarelo = estadoAtual == "ATENCAO";
-  if (modoLocal && !alarme) amarelo = (millis() / 500) % 2 == 0;
-  digitalWrite(LED_VERDE, estadoAtual == "OK" && !modoLocal ? HIGH : LOW);
-  digitalWrite(LED_AMARELO, amarelo ? HIGH : LOW);
-  digitalWrite(LED_VERMELHO, alarme ? HIGH : LOW);
-  bool buzzerAtivo = alarme && (long)(millis() - buzzerSilenciadoAte) >= 0;
-  digitalWrite(BUZZER, buzzerAtivo ? HIGH : LOW);
-}
-
-// No modo local, falha/temperatura insegura prevalece sobre porta aberta.
-String estadoLocal() {
-  if (falhaDht || temperaturaAtual < 2.0 || temperaturaAtual > 8.0) return "ALARME";
-  if (portaAberta && millis() - inicioPortaAberta >= tempoPortaAberta) return "ATENCAO";
-  return "OK";
 }
