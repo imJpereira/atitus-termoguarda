@@ -307,6 +307,9 @@ function stateDescription(state) {
 }
 
 function sectionStateClass(state) {
+  if (state === "SEM_DADOS") {
+    return "status-section status-offline";
+  }
   if (state === "ATENCAO") {
     return "status-section status-attention";
   }
@@ -485,6 +488,9 @@ function App() {
       : "Arduino online";
 
   const updatedText = lastEventAt ? new Date(lastEventAt).toLocaleTimeString("pt-BR") : "—";
+  const connectionDotClass = connection === "connected" ? "dot dot-ok" : "dot dot-alarm";
+  const arduinoDotClass =
+    reading?.arduinoOnline === false || stale || !snapshotLoaded ? "dot dot-alarm" : "dot dot-ok";
 
   useEffect(() => {
     if (!modalOpen) {
@@ -509,9 +515,15 @@ function App() {
           <p>Caixa térmica · Posto de saúde</p>
         </div>
         <div className="topbar-meta">
-          <span>{connectionText}</span>
-          <span>{arduinoText}</span>
-          <span>{new Date().toLocaleString("pt-BR")}</span>
+          <span className="meta-status">
+            <i className={connectionDotClass} />
+            {connectionText}
+          </span>
+          <span className="meta-status">
+            <i className={arduinoDotClass} />
+            {arduinoText}
+          </span>
+          <span className="meta-clock">{new Date().toLocaleString("pt-BR")}</span>
         </div>
       </header>
 
