@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 import time
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import serial
 
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyACM0")
@@ -17,6 +17,8 @@ DOOR_OPEN_LIMIT_CM = 10.0
 DOOR_OPEN_SECONDS = 15.0
 REMAINING_WARNING_SECONDS = 30.0
 TREND_WINDOW_SECONDS = 60.0
+READINGS_WINDOW_SECONDS = 300.0
+ARDUINO_ONLINE_TIMEOUT_SECONDS = 3.0
 MAX_READINGS = 300
 
 serial_conn = None
@@ -176,6 +178,52 @@ def process_reading(parsed: dict, now: float | None = None) -> dict:
     return entry
 
 
+def is_arduino_online(now: float | None = None) -> bool:
+    if now is None:
+        now = time.time()
+    if latest_reading is None or serial_conn is None or not serial_conn.is_open:
+        return False
+    return (now - latest_reading["timestamp"]) <= ARDUINO_ONLINE_TIMEOUT_SECONDS
+
+
+def build_snapshot(now: float | None = None) -> dict:
+    if now is None:
+        now = time.time()
+    reading = latest_reading or {}
+    cutoff = now - READINGS_WINDOW_SECONDS
+    recent_readings = [
+        {
+            "timestamp": item["timestamp"],
+            "temperature": item["temperature"],
+            "humidity": item["humidity"],
+            "distance": item["distance"],
+            "door_open": item["door_open"],
+        }
+        for item in readings
+        if item["timestamp"] >= cutoff
+    ]
+    return {
+        "type": "snapshot",
+        "config": {
+            "range_min": SAFE_MIN_C,
+            "range_max": SAFE_MAX_C,
+            "door_open_seconds": DOOR_OPEN_SECONDS,
+            "remaining_warning_seconds": REMAINING_WARNING_SECONDS,
+        },
+        "state": {
+            "temperature": reading.get("temperature"),
+            "humidity": reading.get("humidity"),
+            "distance": reading.get("distance"),
+            "state": reading.get("state", current_state),
+            "remaining_seconds": reading.get("remaining_seconds"),
+            "door_open": reading.get("door_open"),
+            "arduino_online": is_arduino_online(now),
+        },
+        "readings": recent_readings,
+        "alerts": get_alerts(100),
+    }
+
+
 def send_state(state: str) -> bool:
     with serial_lock:
         if serial_conn is None or not serial_conn.is_open:
@@ -240,14 +288,12 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="TermoGuarda API", lifespan=lifespan)
 
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "state": current_state,
-        "reading": latest_reading,
-        "readings_count": len(readings),
-    }
-
-
-
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        await websocket.send_json(build_snapshot())
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass

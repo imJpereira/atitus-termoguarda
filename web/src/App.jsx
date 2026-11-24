@@ -95,7 +95,9 @@ function buildStateFromSnapshot(snapshot) {
     return null;
   }
 
+  const stateObj = snapshot.state && typeof snapshot.state === "object" ? snapshot.state : null;
   const sourceReading =
+    stateObj ||
     snapshot.reading ||
     snapshot.current ||
     (Array.isArray(snapshot.readings) ? snapshot.readings[snapshot.readings.length - 1] : null) ||
@@ -122,8 +124,8 @@ function buildStateFromSnapshot(snapshot) {
 
 function normalizeSafeRange(snapshotPayload) {
   const config = snapshotPayload?.config || snapshotPayload || {};
-  const minKey = pick(config, ["safe_min", "safeMin", "safe_min_c", "min_temp", "min", "low"]);
-  const maxKey = pick(config, ["safe_max", "safeMax", "safe_max_c", "max_temp", "max", "high"]);
+  const minKey = pick(config, ["range_min", "rangeMin", "safe_min", "safeMin", "safe_min_c", "min_temp", "min", "low"]);
+  const maxKey = pick(config, ["range_max", "rangeMax", "safe_max", "safeMax", "safe_max_c", "max_temp", "max", "high"]);
 
   const min = minKey ? Number(config[minKey]) : Number.NaN;
   const max = maxKey ? Number(config[maxKey]) : Number.NaN;
