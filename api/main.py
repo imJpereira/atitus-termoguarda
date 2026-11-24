@@ -1,5 +1,6 @@
+import asyncio
 from collections import deque
-from contextlib import asynccontextmanager, closing
+from contextlib import asynccontextmanager, closing, suppress
 import math
 import os
 import sqlite3
@@ -28,6 +29,8 @@ current_state = "OK"
 latest_reading = None
 readings = deque(maxlen=MAX_READINGS)
 door_open_since = None
+clients: set[WebSocket] = set()
+main_loop: asyncio.AbstractEventLoop | None = None
 
 
 def init_db():
@@ -173,6 +176,15 @@ def process_reading(parsed: dict, now: float | None = None) -> dict:
     readings.append(entry)
     if state in ("ATENCAO", "ALARME") and state != current_state and reason is not None:
         save_alert(now, state, temperature, reason)
+        alert = {
+            "type": "alert",
+            "timestamp": now,
+            "state": state,
+            "temperature": temperature,
+            "reason": reason,
+        }
+        if main_loop is not None:
+            asyncio.run_coroutine_threadsafe(broadcast(alert), main_loop)
     current_state = state
     latest_reading = entry
     return entry
@@ -184,6 +196,23 @@ def is_arduino_online(now: float | None = None) -> bool:
     if latest_reading is None or serial_conn is None or not serial_conn.is_open:
         return False
     return (now - latest_reading["timestamp"]) <= ARDUINO_ONLINE_TIMEOUT_SECONDS
+
+
+def build_reading(now: float | None = None) -> dict:
+    if now is None:
+        now = time.time()
+    reading = latest_reading or {}
+    return {
+        "type": "reading",
+        "timestamp": reading.get("timestamp", now),
+        "temperature": reading.get("temperature"),
+        "humidity": reading.get("humidity"),
+        "distance": reading.get("distance"),
+        "state": reading.get("state", current_state),
+        "remaining_seconds": reading.get("remaining_seconds"),
+        "door_open": reading.get("door_open"),
+        "arduino_online": is_arduino_online(now),
+    }
 
 
 def build_snapshot(now: float | None = None) -> dict:
@@ -268,14 +297,35 @@ def serial_worker():
             stop_event.wait(1)
 
 
+async def broadcast(message: dict):
+    for client in list(clients):
+        try:
+            await client.send_json(message)
+        except Exception:
+            clients.discard(client)
+
+
+async def reading_broadcaster():
+    while not stop_event.is_set():
+        await asyncio.sleep(1)
+        await broadcast(build_reading())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global main_loop
     init_db()
     stop_event.clear()
+    main_loop = asyncio.get_running_loop()
     thread = threading.Thread(target=serial_worker, daemon=True)
     thread.start()
+    broadcaster_task = asyncio.create_task(reading_broadcaster())
     yield
     stop_event.set()
+    broadcaster_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await broadcaster_task
+    main_loop = None
     thread.join(timeout=2)
     with serial_lock:
         if serial_conn is not None and serial_conn.is_open:
@@ -291,9 +341,12 @@ app = FastAPI(title="TermoGuarda API", lifespan=lifespan)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    clients.add(websocket)
     try:
         await websocket.send_json(build_snapshot())
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
+    finally:
+        clients.discard(websocket)
