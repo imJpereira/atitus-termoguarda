@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager, closing, suppress
+import json
 import math
 import os
 import sqlite3
@@ -305,6 +306,29 @@ async def broadcast(message: dict):
             clients.discard(client)
 
 
+def build_config() -> dict:
+    return {"type": "config", "range_min": SAFE_MIN_C, "range_max": SAFE_MAX_C}
+
+
+async def handle_client_message(websocket: WebSocket, raw: str):
+    global SAFE_MIN_C, SAFE_MAX_C
+    try:
+        msg = json.loads(raw)
+        if msg.get("type") != "set_range":
+            return
+        new_min, new_max = float(msg["min"]), float(msg["max"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        await websocket.send_json(build_config())
+        return
+    # DHT11 mede de 0 a 50 °C
+    if not (0 <= new_min < new_max <= 50):
+        await websocket.send_json(build_config())
+        return
+    # ponytail: faixa só em memória, volta a 2-8 °C ao reiniciar a API
+    SAFE_MIN_C, SAFE_MAX_C = new_min, new_max
+    await broadcast(build_config())
+
+
 async def reading_broadcaster():
     while not stop_event.is_set():
         await asyncio.sleep(1)
@@ -345,7 +369,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await websocket.send_json(build_snapshot())
         while True:
-            await websocket.receive_text()
+            await handle_client_message(websocket, await websocket.receive_text())
     except WebSocketDisconnect:
         pass
     finally:

@@ -394,6 +394,11 @@ function useRealtimeDashboard(socketUrl) {
           return;
         }
 
+        if (eventType === "config") {
+          setSafeRange(normalizeSafeRange(payload));
+          return;
+        }
+
         if (
           eventType === "reading" ||
           (!eventType &&
@@ -454,13 +459,50 @@ function useRealtimeDashboard(socketUrl) {
     };
   }, [socketUrl]);
 
-  return { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt };
+  const sendRange = (min, max) => {
+    const ws = socketRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "set_range", min, max }));
+    }
+  };
+
+  return { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt, sendRange };
+}
+
+function RangeForm({ safeRange, onSave, disabled }) {
+  const [min, setMin] = useState(String(safeRange.min));
+  const [max, setMax] = useState(String(safeRange.max));
+
+  useEffect(() => {
+    setMin(String(safeRange.min));
+    setMax(String(safeRange.max));
+  }, [safeRange.min, safeRange.max]);
+
+  const minN = Number(min);
+  const maxN = Number(max);
+  const valid = min !== "" && max !== "" && minN >= 0 && minN < maxN && maxN <= 50;
+
+  return (
+    <form
+      className="range-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (valid) onSave(minN, maxN);
+      }}
+    >
+      <span className="kicker">Faixa segura (°C)</span>
+      <input type="number" step="0.5" min="0" max="50" value={min} onChange={(e) => setMin(e.target.value)} aria-label="Mínimo" />
+      <span>a</span>
+      <input type="number" step="0.5" min="0" max="50" value={max} onChange={(e) => setMax(e.target.value)} aria-label="Máximo" />
+      <button type="submit" disabled={!valid || disabled}>Salvar</button>
+    </form>
+  );
 }
 
 function App() {
   const apiUrl = import.meta.env.VITE_API_URL || "";
   const wsUrl = import.meta.env.VITE_WS_URL || toWsFromApi(apiUrl);
-  const { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt } =
+  const { connection, snapshotLoaded, reading, readings, alerts, safeRange, lastEventAt, sendRange } =
     useRealtimeDashboard(wsUrl);
   const [modalOpen, setModalOpen] = useState(false);
   const now = Date.now();
@@ -593,6 +635,7 @@ function App() {
             </span>
           </div>
           <TemperatureChart readings={readings} safeRange={safeRange} />
+          <RangeForm safeRange={safeRange} onSave={sendRange} disabled={connection !== "connected"} />
         </article>
         <article className="panel">
           <div className="panel-header">
