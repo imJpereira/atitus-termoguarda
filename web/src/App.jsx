@@ -593,7 +593,7 @@ function App() {
           </small>
         </article>
         <article>
-          <span className="kicker">Tempo até 8 °C</span>
+          <span className="kicker">Tempo até {safeRange.max.toString().replace(".", ",")} °C</span>
           <strong>{formatRemaining(reading?.remainingSeconds)}</strong>
           <small>{reading?.remainingSeconds === null ? "Temperatura estável" : "Estimativa atual"}</small>
         </article>
